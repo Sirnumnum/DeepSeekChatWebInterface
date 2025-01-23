@@ -1,0 +1,7 @@
+pip==24.2
+flask
+python-dotenv
+requests
+python-multipart
+PyPDF2       # For PDF processing (optional)
+python-docx  # For Word docs (optional)
