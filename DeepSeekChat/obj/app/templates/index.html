@@ -1,0 +1,312 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>DeepSeek Chat</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <!-- Prism.js for code formatting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.24.1/themes/prism.min.css">
+</head>
+<body>
+    <div class="sidebar">
+        <button class="new-chat-btn" onclick="createNewChat()">+ New Chat</button>
+        <div id="chat-list" class="chat-list"></div>
+    </div>
+
+    <div class="main-content">
+        <div class="header">
+            <h1>DeepSeek Chat</h1>
+            <div class="controls">
+                <select id="model-select">
+                    <option value="deepseek-chat">DeepSeek Chat</option>
+                    <option value="deepseek-reasoner">DeepSeek Reasoner</option>
+                </select>
+                <input type="file" id="file-input" accept=".txt,.pdf,.docx">
+            </div>
+        </div>
+
+        <div id="chat-window" class="chat-window"></div>
+
+        <div class="input-area">
+            <input type="text" id="user-input" placeholder="Type your message...">
+            <button class="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.24.1/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.24.1/components/prism-python.min.js"></script>
+    <script>
+        let activeChatId = null;
+        const chats = {}; // Local cache of chat data
+
+        // Chat management functions
+        // Updated createNewChat function
+        async function createNewChat() {
+            const chatName = prompt("Enter chat name:", `Chat ${Object.keys(chats).length + 1}`);
+            if (!chatName) return;
+
+            try {
+                const response = await fetch('/api/chats/new', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify({ name: chatName })
+                });
+
+                if (!response.ok) throw new Error(await response.text());
+
+                const data = await response.json();
+                activeChatId = data.chat_id;
+
+                // Update local cache
+                chats[activeChatId] = {
+                    name: chatName,
+                    messages: []
+                };
+
+                // Refresh chat list and clear window
+                await loadChatList();
+                clearChatWindow();
+
+            } catch (error) {
+                console.error('Chat creation failed:', error);
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        async function loadChatList() {
+            try {
+                const response = await fetch('/api/chats');
+                if (!response.ok) throw new Error(await response.text());
+
+                const chatsData = await response.json();
+                const chatList = document.getElementById('chat-list');
+                chatList.innerHTML = '';
+
+                chatsData.forEach(chat => {
+                    // Update local cache
+                    if (!chats[chat.id]) {
+                        chats[chat.id] = {
+                            name: chat.name,
+                            messages: []
+                        };
+                    }
+
+                    // Create chat item
+                    const chatItem = document.createElement('div');
+                    chatItem.className = `chat-item ${activeChatId === chat.id ? 'active' : ''}`;
+                    chatItem.innerHTML = `
+                <span>${chat.name}</span>
+                <button class="delete-btn" onclick="deleteChat('${chat.id}')">×</button>
+            `;
+                    chatItem.onclick = () => switchChat(chat.id);
+                    chatList.appendChild(chatItem);
+                });
+
+            } catch (error) {
+                console.error('Failed to load chats:', error);
+            }
+        }
+
+        async function switchChat(chatId) {
+            try {
+                const response = await fetch(`/api/chat/${chatId}`);
+                if (!response.ok) throw new Error(await response.text());
+
+                const chatData = await response.json();
+
+                // Ensure messages is an array
+                const messages = Array.isArray(chatData.messages)
+                    ? chatData.messages
+                    : [];
+
+                // Update local cache
+                chats[chatId] = {
+                    name: chatData.name,
+                    messages: messages
+                };
+
+                // Clear and repopulate chat window
+                clearChatWindow();
+                messages.forEach(msg => appendMessage(msg.role, msg.content));
+
+                // Update active chat
+                activeChatId = chatId;
+                loadChatList();
+
+            } catch (error) {
+                console.error('Chat switch failed:', error);
+                appendMessage('system', `Error: ${error.message}`);
+            }
+        }
+
+        // Message handling
+        // Updated sendMessage function
+        async function sendMessage() {
+            const input = document.getElementById('user-input');
+            const message = input.value.trim();
+            if (!message || !activeChatId) return;
+
+            try {
+                // Clear input immediately
+                input.value = '';
+
+                // Add user message to UI
+                appendMessage('user', message);
+
+                // Send to backend
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        chat_id: activeChatId,
+                        messages: [{ role: 'user', content: message }],
+                        model: document.getElementById('model-select').value
+                    })
+                });
+
+                if (!response.ok) throw new Error(await response.text());
+
+                // Add AI response
+                const data = await response.json();
+                appendMessage('assistant', data.choices[0].message.content);
+
+                // Update local cache
+                if (chats[activeChatId]) {
+                    chats[activeChatId].messages.push(
+                        { role: 'user', content: message },
+                        { role: 'assistant', content: data.choices[0].message.content }
+                    );
+                }
+
+            } catch (error) {
+                console.error('Send failed:', error);
+                appendMessage('system', `Error: ${error.message}`);
+                input.value = message; // Restore message
+            }
+        }
+
+        // File handling
+        document.getElementById('file-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            const model = document.getElementById('model-select').value;
+            if (!file || !activeChatId) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('model', model);
+            formData.append('chat_id', activeChatId);
+
+            appendMessage('user', `📁 ${file.name}`);
+
+            try {
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                appendMessage('assistant', data.choices[0].message.content);
+                chats[activeChatId].messages.push(
+                    { role: 'user', content: `Uploaded file: ${file.name}` },
+                    { role: 'assistant', content: data.choices[0].message.content }
+                );
+            } catch (error) {
+                console.error('Error:', error);
+                appendMessage('system', 'Error uploading file');
+            }
+        });
+
+        // UI functions
+        function appendMessage(role, content) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+
+            // Process Markdown and code blocks
+            const processedContent = content
+                .replace(/### (.*)/g, '<h3>$1</h3>') // Headers
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') // Bold
+                .replace(/\*(.*?)\*/g, '<em>$1</em>'); // Italics
+
+            // Split into code blocks and text
+            const parts = processedContent.split(/(```[\s\S]*?```)/g);
+
+            parts.forEach(part => {
+                if (!part.trim()) return;
+
+                const codeMatch = part.match(/```(\w+)?\n([\s\S]*?)```/);
+                if (codeMatch) {
+                    const [_, lang, code] = codeMatch;
+                    const language = lang?.trim() || 'plaintext';
+
+                    const codeContainer = document.createElement('div');
+                    codeContainer.className = 'code-container';
+
+                    // Copy button
+                    const copyButton = document.createElement('button');
+                    copyButton.className = 'copy-button';
+                    copyButton.textContent = 'Copy';
+                    copyButton.onclick = () => navigator.clipboard.writeText(code.trim());
+
+                    // Code element
+                    const pre = document.createElement('pre');
+                    const codeEl = document.createElement('code');
+                    codeEl.className = `language-${language}`;
+                    codeEl.textContent = code.trim();
+
+                    pre.appendChild(codeEl);
+                    codeContainer.appendChild(copyButton);
+                    codeContainer.appendChild(pre);
+                    messageDiv.appendChild(codeContainer);
+
+                    Prism.highlightElement(codeEl);
+                } else {
+                    const textContent = document.createElement('div');
+                    textContent.className = 'message-content';
+                    textContent.innerHTML = part.trim();
+                    messageDiv.appendChild(textContent);
+                }
+            });
+
+            document.getElementById('chat-window').appendChild(messageDiv);
+            messageDiv.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // Clipboard function
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                console.log('Code copied to clipboard');
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+            });
+        }
+
+        // Add Enter key support
+        // Add to bottom of file
+        document.getElementById('user-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();  // Prevent newline
+                sendMessage();
+            }
+        });
+
+        function clearChatWindow() {
+            document.getElementById('chat-window').innerHTML = '';
+        }
+
+        // Add this initialization
+        document.getElementById('user-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        // Initialize
+        loadChatList();
+    </script>
+</body>
+</html>
+
